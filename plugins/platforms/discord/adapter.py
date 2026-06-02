@@ -30,6 +30,77 @@ _DISCORD_COMMAND_SYNC_STATE_SUBDIR = "gateway"
 _DISCORD_COMMAND_SYNC_STATE_FILENAME = "discord_command_sync_state.json"
 _DISCORD_COMMAND_SYNC_MUTATION_INTERVAL_SECONDS = 4.5
 _DISCORD_COMMAND_SYNC_MAX_RATE_LIMIT_SLEEP_SECONDS = 30.0
+_DISCORD_BUTTON_LABEL_MAX_CHARS = 80
+_DISCORD_COMPACT_CHOICE_LABEL_THRESHOLD = 56
+_DISCORD_CHOICES_FIELD_MAX_CHARS = 1024
+
+
+def _discord_clarify_uses_compact_choice_buttons(choices: List[str]) -> bool:
+    """Return True when choice text should live in the embed, not buttons."""
+    return len(choices) > 4 or any(
+        len(str(choice or "")) > _DISCORD_COMPACT_CHOICE_LABEL_THRESHOLD
+        for choice in choices
+    )
+
+
+def _discord_clarify_button_label(index: int, choice: str, *, compact: bool) -> str:
+    """Build a Discord-safe clarify button label.
+
+    Native Discord buttons are single-line controls with an 80-character label
+    cap. For long options, use compact numeric labels and show the full choice
+    text in the embed field instead of truncating the actionable text.
+    """
+    if compact:
+        return str(index + 1)
+
+    prefix = f"{index + 1}. "
+    budget = _DISCORD_BUTTON_LABEL_MAX_CHARS - len(prefix)
+    if len(choice) <= budget:
+        return f"{prefix}{choice}"
+    return f"{prefix}{choice[: max(0, budget - 3)]}..."
+
+
+def _discord_clarify_button_row(index: int, total_choices: int, *, compact: bool) -> int:
+    """Choose a row that avoids squeezing readable labels side-by-side."""
+    if not compact and total_choices <= 4:
+        return index
+    return min(index // 5, 4)
+
+
+def _discord_clarify_other_button_row(total_choices: int, *, compact: bool) -> int:
+    if not compact and total_choices <= 4:
+        return total_choices
+    return min(total_choices // 5, 4)
+
+
+def _format_discord_clarify_choices_field(choices: List[str]) -> str:
+    """Return a multi-line choices field that keeps full text readable."""
+    instruction = "Click a button number below, or click ✏️ Other to type a custom answer."
+    budget = _DISCORD_CHOICES_FIELD_MAX_CHARS - len(instruction) - 2
+    lines: List[str] = []
+    current_len = 0
+
+    for index, choice in enumerate(choices, start=1):
+        cleaned = " ".join(str(choice or "").strip().split())
+        line = f"{index}. {cleaned}"
+        if len(line) > 240:
+            line = f"{line[:237]}..."
+
+        separator_len = 1 if lines else 0
+        if current_len + separator_len + len(line) > budget:
+            remaining = len(choices) - index + 1
+            marker = f"... +{remaining} more choices"
+            marker_sep = 1 if lines else 0
+            if lines and current_len + marker_sep + len(marker) <= budget:
+                lines.append(marker)
+            break
+
+        lines.append(line)
+        current_len += separator_len + len(line)
+
+    if not lines:
+        return instruction
+    return f"{'\n'.join(lines)}\n\n{instruction}"
 
 try:
     import discord
@@ -3844,6 +3915,61 @@ class DiscordAdapter(BasePlatformAdapter):
             logger.warning("[%s] Failed to fetch channel history: %s", self.name, e)
             return ""
 
+    async def _fetch_thread_starter_context(self, thread: Any) -> str:
+        """Fetch the message that created a Discord thread for context-only use.
+
+        Discord message-created threads use the starter message's snowflake ID
+        as the thread ID. Fetching that parent-channel message lets a human
+        mention Hermes inside a manual thread and still give the model the
+        alert/post that the thread was created from, without allowing bot
+        messages to trigger Hermes directly.
+        """
+        parent = getattr(thread, "parent", None)
+        thread_id = getattr(thread, "id", None)
+        if parent is None or thread_id is None or not hasattr(parent, "fetch_message"):
+            return ""
+
+        try:
+            starter = await parent.fetch_message(int(thread_id))
+        except Exception as exc:
+            logger.debug("[%s] Failed to fetch Discord thread starter %s: %s", self.name, thread_id, exc)
+            return ""
+
+        content = (
+            getattr(starter, "clean_content", None)
+            or getattr(starter, "content", None)
+            or ""
+        ).strip()
+        attachments = getattr(starter, "attachments", None) or []
+        if not content and attachments:
+            content = "(attachment)"
+        if not content:
+            return ""
+
+        max_chars = 6000
+        if len(content) > max_chars:
+            content = f"{content[:max_chars]}\n… [truncated]"
+
+        author = getattr(starter, "author", None)
+        author_name = (
+            getattr(author, "display_name", None)
+            or getattr(author, "name", None)
+            or "unknown"
+        )
+        if getattr(author, "bot", False):
+            author_name = f"{author_name} [bot]"
+
+        parent_name = getattr(parent, "name", None) or str(getattr(parent, "id", "unknown"))
+        thread_name = getattr(thread, "name", None) or str(thread_id)
+        return (
+            "[Thread starter context]\n"
+            f"channel: #{parent_name}\n"
+            f"thread: {thread_name}\n"
+            f"starter_author: {author_name}\n"
+            "starter_content:\n"
+            f"{content}"
+        )
+
     def _thread_parent_channel(self, channel: Any) -> Any:
         """Return the parent text channel when invoked from a thread."""
         return getattr(channel, "parent", None) or channel
@@ -4199,14 +4325,20 @@ class DiscordAdapter(BasePlatformAdapter):
             if clean_choices:
                 embed.add_field(
                     name="Choices",
-                    value="Pick one below, or click ✏️ Other to type a custom answer.",
+                    value=_format_discord_clarify_choices_field(clean_choices),
                     inline=False,
                 )
+                try:
+                    from tools.clarify_gateway import get_clarify_timeout
+                    clarify_timeout = get_clarify_timeout()
+                except Exception:
+                    clarify_timeout = 600
                 view = ClarifyChoiceView(
                     choices=clean_choices,
                     clarify_id=clarify_id,
                     allowed_user_ids=self._allowed_user_ids,
                     allowed_role_ids=self._allowed_role_ids,
+                    timeout=clarify_timeout,
                 )
             else:
                 embed.add_field(
@@ -4582,11 +4714,14 @@ class DiscordAdapter(BasePlatformAdapter):
         # @mention in a text channel so each conversation is isolated (like Slack).
         # Messages already inside threads or DMs are unaffected.
         # no_thread_channels: channels where bot responds directly without thread.
+        # Free-response channels stay direct for ambient messages, but an
+        # explicit bot mention still starts an isolated thread.
         auto_threaded_channel = None
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
             no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")
             no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}
-            skip_thread = bool(channel_ids & no_thread_channels) or is_free_channel
+            explicit_mention = mention_prefix or (self._client.user in getattr(message, "mentions", []))
+            skip_thread = bool(channel_ids & no_thread_channels) or (is_free_channel and not explicit_mention)
             auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in {"true", "1", "yes"}
             is_reply_message = getattr(message, "type", None) == discord.MessageType.reply
             if auto_thread and not skip_thread and not is_voice_linked_channel and not is_reply_message:
@@ -4829,6 +4964,10 @@ class DiscordAdapter(BasePlatformAdapter):
                 )
                 if _backfill_text:
                     _channel_context = _backfill_text
+                elif is_thread and mention_prefix:
+                    _starter_context = await self._fetch_thread_starter_context(message.channel)
+                    if _starter_context:
+                        _channel_context = _starter_context
 
         # Defense-in-depth: prevent empty user messages from entering session
         # (can happen when user sends @mention-only with no other text).
@@ -5578,29 +5717,44 @@ def _define_discord_view_classes() -> None:
             clarify_id: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            timeout: Optional[float] = None,
         ):
-            super().__init__(timeout=300)  # 5-minute timeout
+            view_timeout = float(timeout) if timeout and timeout > 0 else None
+            super().__init__(timeout=view_timeout)
             self.choices = list(choices)[:24]
             self.clarify_id = clarify_id
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
             self.resolved = False
 
+            compact_labels = _discord_clarify_uses_compact_choice_buttons(self.choices)
             for index, choice in enumerate(self.choices):
-                # Discord button labels are capped at 80 chars.
-                label_body = choice if len(choice) <= 75 else choice[:72] + "..."
+                label = _discord_clarify_button_label(
+                    index,
+                    choice,
+                    compact=compact_labels,
+                )
                 button = discord.ui.Button(
-                    label=f"{index + 1}. {label_body}",
+                    label=label,
                     style=discord.ButtonStyle.primary,
                     custom_id=f"clarify:{clarify_id}:{index}",
+                    row=_discord_clarify_button_row(
+                        index,
+                        len(self.choices),
+                        compact=compact_labels,
+                    ),
                 )
                 button.callback = self._make_choice_callback(index, choice)
                 self.add_item(button)
 
             other_btn = discord.ui.Button(
-                label="✏️ Other (type answer)",
+                label="✏️ Other",
                 style=discord.ButtonStyle.secondary,
                 custom_id=f"clarify:{clarify_id}:other",
+                row=_discord_clarify_other_button_row(
+                    len(self.choices),
+                    compact=compact_labels,
+                ),
             )
             other_btn.callback = self._on_other
             self.add_item(other_btn)
