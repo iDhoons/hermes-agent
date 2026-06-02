@@ -235,6 +235,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     source TEXT NOT NULL,
     user_id TEXT,
+    session_key TEXT,
+    chat_type TEXT,
+    chat_id TEXT,
+    thread_id TEXT,
+    parent_chat_id TEXT,
+    guild_id TEXT,
+    scope_key TEXT,
+    scope_kind TEXT,
     model TEXT,
     model_config TEXT,
     system_prompt TEXT,
@@ -916,18 +924,36 @@ class SessionDB:
         system_prompt: str = None,
         user_id: str = None,
         parent_session_id: str = None,
+        session_key: str = None,
+        chat_type: str = None,
+        chat_id: str = None,
+        thread_id: str = None,
+        parent_chat_id: str = None,
+        guild_id: str = None,
+        scope_key: str = None,
+        scope_kind: str = None,
         cwd: str = None,
     ) -> None:
         """Shared INSERT OR IGNORE for session rows."""
         def _do(conn):
             conn.execute(
-                """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
-                   system_prompt, parent_session_id, cwd, started_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT OR IGNORE INTO sessions (
+                   id, source, user_id, session_key, chat_type, chat_id,
+                   thread_id, parent_chat_id, guild_id, scope_key, scope_kind,
+                   model, model_config, system_prompt, parent_session_id, cwd, started_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     source,
                     user_id,
+                    session_key,
+                    chat_type,
+                    chat_id,
+                    thread_id,
+                    parent_chat_id,
+                    guild_id,
+                    scope_key,
+                    scope_kind,
                     model,
                     json.dumps(model_config) if model_config else None,
                     system_prompt,
@@ -1565,6 +1591,7 @@ class SessionDB:
         order_by_last_active: bool = False,
         include_archived: bool = False,
         archived_only: bool = False,
+        scope_key_filter: str = None,
     ) -> List[Dict[str, Any]]:
         """List sessions with preview (first user message) and last active timestamp.
 
@@ -1624,6 +1651,9 @@ class SessionDB:
             where_clauses.append("s.archived = 1")
         elif not include_archived:
             where_clauses.append("s.archived = 0")
+        if scope_key_filter:
+            where_clauses.append("s.scope_key = ?")
+            params.append(scope_key_filter)
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         if order_by_last_active:
@@ -2706,6 +2736,7 @@ class SessionDB:
         offset: int = 0,
         sort: str = None,
         include_inactive: bool = False,
+        scope_key_filter: str = None,
     ) -> List[Dict[str, Any]]:
         """
         Full-text search across session messages using FTS5.
@@ -2775,7 +2806,9 @@ class SessionDB:
             exclude_placeholders = ",".join("?" for _ in exclude_sources)
             where_clauses.append(f"s.source NOT IN ({exclude_placeholders})")
             params.extend(exclude_sources)
-
+        if scope_key_filter:
+            where_clauses.append("s.scope_key = ?")
+            params.append(scope_key_filter)
         if role_filter:
             role_placeholders = ",".join("?" for _ in role_filter)
             where_clauses.append(f"m.role IN ({role_placeholders})")
@@ -2852,6 +2885,9 @@ class SessionDB:
                 if exclude_sources is not None:
                     tri_where.append(f"s.source NOT IN ({','.join('?' for _ in exclude_sources)})")
                     tri_params.extend(exclude_sources)
+                if scope_key_filter:
+                    tri_where.append("s.scope_key = ?")
+                    tri_params.append(scope_key_filter)
                 if role_filter:
                     tri_where.append(f"m.role IN ({','.join('?' for _ in role_filter)})")
                     tri_params.extend(role_filter)
@@ -2907,6 +2943,9 @@ class SessionDB:
                 if exclude_sources is not None:
                     like_where.append(f"s.source NOT IN ({','.join('?' for _ in exclude_sources)})")
                     like_params.extend(exclude_sources)
+                if scope_key_filter:
+                    like_where.append("s.scope_key = ?")
+                    like_params.append(scope_key_filter)
                 if role_filter:
                     like_where.append(f"m.role IN ({','.join('?' for _ in role_filter)})")
                     like_params.extend(role_filter)
