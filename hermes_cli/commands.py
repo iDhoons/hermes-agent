@@ -170,6 +170,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                subcommands=("search", "browse", "inspect", "install", "audit")),
     CommandDef("bundles", "List skill bundles (aliases /<name> for multiple skills)",
                "Tools & Skills"),
+    CommandDef("ingest", "Ingest a URL, file, or source text into an Obsidian research note",
+               "Tools & Skills", args_hint="<source>"),
     CommandDef("cron", "Manage scheduled tasks", "Tools & Skills",
                cli_only=True, args_hint="[subcommand]",
                subcommands=("list", "add", "create", "edit", "pause", "resume", "run", "remove")),

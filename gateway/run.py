@@ -86,6 +86,16 @@ _TELEGRAM_NOISY_STATUS_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+_DISCORD_NOISY_PROVIDER_STATUS_RE = re.compile(
+    r"("  # transient provider wait/retry statuses; keep in logs, not Discord chat
+    r"no\s+first\s+byte\s+from\s+provider\s+in\s+\d+s"
+    r"|no\s+response\s+from\s+provider\s+for\s+\d+s"
+    r"|rate\s+limited\.\s+waiting\s+\d"
+    r"|retrying\s+in\s+\d"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+
 _GATEWAY_PROVIDER_ERROR_RE = re.compile(
     r"("  # infrastructure/provider error preambles, not ordinary assistant prose
     r"api\s+(?:call\s+)?failed"
@@ -308,7 +318,12 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
     text = str(message or "").strip()
     if not text:
         return None
-    if _gateway_platform_value(platform) != "telegram":
+    platform_value = _gateway_platform_value(platform)
+    if platform_value == "discord":
+        if _DISCORD_NOISY_PROVIDER_STATUS_RE.search(text):
+            return None
+        return text
+    if platform_value != "telegram":
         return text
 
     text = _redact_gateway_user_facing_secrets(text)
@@ -8166,6 +8181,19 @@ class GatewayRunner:
 
         if canonical == "bundles":
             return await self._handle_bundles_command(event)
+
+        if canonical == "ingest":
+            from hermes_cli.ingest_command import INGEST_USAGE, build_ingest_prompt
+
+            prompt = build_ingest_prompt(event.get_command_args())
+            if not prompt:
+                return INGEST_USAGE
+            event.text = prompt
+            # /ingest is a prompt-building command.  Once rewritten, clear
+            # the parsed command so the generic quick/plugin/skill slash
+            # checks below don't try to re-dispatch the original token.
+            command = None
+            canonical = None
 
         if canonical == "approve":
             return await self._handle_approve_command(event)

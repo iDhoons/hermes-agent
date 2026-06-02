@@ -8899,6 +8899,19 @@ class HermesCLI:
                 self._reload_skills()
         elif canonical == "bundles":
             self._handle_bundles_command(cmd_original)
+        elif canonical == "ingest":
+            from hermes_cli.ingest_command import INGEST_USAGE, build_ingest_prompt
+
+            parts = cmd_original.split(maxsplit=1)
+            prompt = build_ingest_prompt(parts[1] if len(parts) > 1 else "")
+            if not prompt:
+                _cprint(f"  {INGEST_USAGE}")
+            elif hasattr(self, '_pending_input'):
+                self._pending_input.put(prompt)
+                preview = parts[1].strip()[:80]
+                _cprint(f"  Queued ingest: {preview}{'...' if len(parts[1].strip()) > 80 else ''}")
+            else:
+                _cprint("  Cannot queue /ingest: input queue is unavailable.")
         elif canonical == "browser":
             self._handle_browser_command(cmd_original)
         elif canonical == "plugins":

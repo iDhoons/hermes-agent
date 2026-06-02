@@ -97,7 +97,16 @@ class FakeTree:
 
 
 @pytest.fixture
-def adapter():
+def adapter(monkeypatch):
+    for key in (
+        "DISCORD_ALLOWED_CHANNELS",
+        "DISCORD_AUTO_THREAD",
+        "DISCORD_FREE_RESPONSE_CHANNELS",
+        "DISCORD_IGNORED_CHANNELS",
+        "DISCORD_NO_THREAD_CHANNELS",
+        "DISCORD_REQUIRE_MENTION",
+    ):
+        monkeypatch.delenv(key, raising=False)
     config = PlatformConfig(enabled=True, token="***")
     adapter = DiscordAdapter(config)
     adapter._client = SimpleNamespace(
@@ -174,7 +183,7 @@ async def test_auto_registers_missing_gateway_commands(adapter):
 
     # These commands are gateway-available but were not in the original
     # hardcoded registration list — they should be auto-registered.
-    expected_auto = {"debug", "yolo", "profile"}
+    expected_auto = {"debug", "yolo", "profile", "ingest"}
     for name in expected_auto:
         assert name in tree_names, f"/{name} should be auto-registered on Discord"
 
