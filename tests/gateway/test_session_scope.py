@@ -192,6 +192,52 @@ def test_session_db_create_session_inherits_scope_metadata_from_parent(tmp_path)
     assert row["scope_kind"] == "current_thread"
 
 
+def test_session_db_create_session_inherits_scope_metadata_from_nearest_scoped_ancestor(tmp_path) -> None:
+    db = SessionDB(tmp_path / "state.db")
+
+    db.create_session(
+        "scoped-root",
+        source="discord",
+        user_id="user-1",
+        session_key="agent:main:discord:thread:thread-456",
+        chat_type="thread",
+        chat_id="thread-456",
+        thread_id="thread-456",
+        parent_chat_id="parent-123",
+        guild_id="guild-1",
+        scope_key="discord:thread:thread-456",
+        scope_kind="current_thread",
+    )
+    # Simulate a legacy compression child that was created before scope
+    # inheritance existed, leaving every scope column NULL.
+    db._conn.execute(
+        """
+        INSERT INTO sessions (id, source, parent_session_id, started_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        ("legacy-null-child", "discord", "scoped-root", 1.0),
+    )
+    db._conn.commit()
+
+    db.create_session(
+        "new-compression-child",
+        source="discord",
+        parent_session_id="legacy-null-child",
+    )
+
+    row = db.get_session("new-compression-child")
+    assert row["parent_session_id"] == "legacy-null-child"
+    assert row["user_id"] == "user-1"
+    assert row["session_key"] == "agent:main:discord:thread:thread-456"
+    assert row["chat_type"] == "thread"
+    assert row["chat_id"] == "thread-456"
+    assert row["thread_id"] == "thread-456"
+    assert row["parent_chat_id"] == "parent-123"
+    assert row["guild_id"] == "guild-1"
+    assert row["scope_key"] == "discord:thread:thread-456"
+    assert row["scope_kind"] == "current_thread"
+
+
 def test_session_db_create_session_preserves_explicit_child_scope_metadata(tmp_path) -> None:
     db = SessionDB(tmp_path / "state.db")
 

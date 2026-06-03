@@ -938,8 +938,10 @@ class SessionDB:
 
         Compression creates a continuation session with only
         ``parent_session_id`` available. Inherit gateway scope metadata from the
-        parent so scoped recall/search stays in the same Discord thread after a
-        compression split.
+        nearest ancestor that has it so scoped recall/search stays in the same
+        Discord thread after a compression split. Walking ancestors protects
+        legacy chains whose direct parent was created before scope inheritance
+        existed and therefore has NULL metadata.
         """
         def _do(conn):
             inherited = {
@@ -954,16 +956,30 @@ class SessionDB:
                 "scope_kind": scope_kind,
             }
             if parent_session_id and any(value is None for value in inherited.values()):
-                parent = conn.execute(
-                    """SELECT user_id, session_key, chat_type, chat_id,
-                              thread_id, parent_chat_id, guild_id, scope_key, scope_kind
-                       FROM sessions WHERE id = ?""",
+                ancestors = conn.execute(
+                    """WITH RECURSIVE ancestors(id, depth) AS (
+                           SELECT ?, 0
+                           UNION ALL
+                           SELECT s.parent_session_id, ancestors.depth + 1
+                           FROM sessions s
+                           JOIN ancestors ON s.id = ancestors.id
+                           WHERE s.parent_session_id IS NOT NULL
+                             AND ancestors.depth < 100
+                       )
+                       SELECT s.user_id, s.session_key, s.chat_type, s.chat_id,
+                              s.thread_id, s.parent_chat_id, s.guild_id,
+                              s.scope_key, s.scope_kind
+                       FROM ancestors
+                       JOIN sessions s ON s.id = ancestors.id
+                       ORDER BY ancestors.depth""",
                     (parent_session_id,),
-                ).fetchone()
-                if parent:
+                ).fetchall()
+                for ancestor in ancestors:
                     for key in inherited:
-                        if inherited[key] is None:
-                            inherited[key] = parent[key]
+                        if inherited[key] is None and ancestor[key] is not None:
+                            inherited[key] = ancestor[key]
+                    if all(value is not None for value in inherited.values()):
+                        break
 
             conn.execute(
                 """INSERT OR IGNORE INTO sessions (
