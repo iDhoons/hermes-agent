@@ -857,7 +857,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     if allow_bots == "none":
                         return
                     elif allow_bots == "mentions":
-                        if not self._client.user or self._client.user not in message.mentions:
+                        if not adapter_self._message_mentions_self(message):
                             return
                     # "all" falls through; bot is permitted — skip the
                     # human-user allowlist below (bots aren't in it).
@@ -886,10 +886,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 # with bot-aware filtering that works correctly when multiple
                 # agents share a channel.
                 if not isinstance(message.channel, discord.DMChannel) and message.mentions:
-                    _self_mentioned = (
-                        self._client.user is not None
-                        and self._client.user in message.mentions
-                    )
+                    _self_mentioned = adapter_self._message_mentions_self(message)
                     _other_bots_mentioned = any(
                         m.bot and m != self._client.user
                         for m in message.mentions
@@ -3690,6 +3687,39 @@ class DiscordAdapter(BasePlatformAdapter):
             return bool(configured)
         return os.getenv("DISCORD_REQUIRE_MENTION", "true").lower() not in {"false", "0", "no", "off"}
 
+    def _discord_call_role_ids(self) -> set[str]:
+        """Return role IDs whose Discord mention counts as invoking this bot."""
+        raw = os.getenv("DISCORD_CALL_ROLES", "")
+        return {part.strip() for part in raw.split(",") if part.strip()}
+
+    def _message_mentions_call_role(self, message: Any) -> bool:
+        """Return True when a configured call role is mentioned in the message."""
+        role_ids = self._discord_call_role_ids()
+        if not role_ids:
+            return False
+
+        for role in getattr(message, "role_mentions", None) or []:
+            if str(getattr(role, "id", "")) in role_ids:
+                return True
+
+        content = getattr(message, "content", "") or ""
+        return any(f"<@&{role_id}>" in content for role_id in role_ids)
+
+    def _message_mentions_self(self, message: Any) -> bool:
+        """Return True when the message directly mentions this bot or a call role."""
+        direct_mention = (
+            self._client is not None
+            and self._client.user is not None
+            and self._client.user in (getattr(message, "mentions", None) or [])
+        )
+        return bool(direct_mention or self._message_mentions_call_role(message))
+
+    def _strip_call_role_mentions(self, content: str) -> str:
+        """Remove configured call-role mention tokens from message content."""
+        for role_id in self._discord_call_role_ids():
+            content = content.replace(f"<@&{role_id}>", "")
+        return content.strip()
+
     def _discord_allow_any_attachment(self) -> bool:
         """Return whether Discord attachments bypass the SUPPORTED_DOCUMENT_TYPES allowlist.
 
@@ -4625,6 +4655,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # Config (all settable via discord.* in config.yaml or DISCORD_* env vars):
         #   discord.require_mention: Require @mention in server channels (default: true)
         #   discord.free_response_channels: Channel IDs where bot responds without mention
+        #   discord.call_roles: Role IDs whose mention counts as calling the bot
         #   discord.ignored_channels: Channel IDs where bot NEVER responds (even when mentioned)
         #   discord.allowed_channels: If set, bot ONLY responds in these channels (whitelist)
         #   discord.no_thread_channels: Channel IDs where bot responds directly without creating thread
@@ -4655,10 +4686,12 @@ class DiscordAdapter(BasePlatformAdapter):
             if snapshot_text_parts and not raw_content:
                 raw_content = "\n".join(snapshot_text_parts)
                 normalized_content = raw_content
-        if self._client.user and self._client.user in message.mentions:
+        if self._message_mentions_self(message):
             mention_prefix = True
-            normalized_content = normalized_content.replace(f"<@{self._client.user.id}>", "").strip()
-            normalized_content = normalized_content.replace(f"<@!{self._client.user.id}>", "").strip()
+            if self._client.user:
+                normalized_content = normalized_content.replace(f"<@{self._client.user.id}>", "").strip()
+                normalized_content = normalized_content.replace(f"<@!{self._client.user.id}>", "").strip()
+            normalized_content = self._strip_call_role_mentions(normalized_content)
             message.content = normalized_content
         if not isinstance(message.channel, discord.DMChannel):
             channel_ids = {str(message.channel.id)}
@@ -6249,7 +6282,7 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     The DiscordAdapter reads its runtime configuration via ``os.getenv()``
     throughout the connect / handle code paths (``DISCORD_ALLOWED_USERS``,
     ``DISCORD_REQUIRE_MENTION``, ``DISCORD_FREE_RESPONSE_CHANNELS``,
-    ``DISCORD_AUTO_THREAD``, ``DISCORD_REACTIONS``,
+    ``DISCORD_CALL_ROLES``, ``DISCORD_AUTO_THREAD``, ``DISCORD_REACTIONS``,
     ``DISCORD_IGNORED_CHANNELS``, ``DISCORD_ALLOWED_CHANNELS``,
     ``DISCORD_NO_THREAD_CHANNELS``, ``DISCORD_HISTORY_BACKFILL``,
     ``DISCORD_HISTORY_BACKFILL_LIMIT``, ``DISCORD_ALLOW_MENTION_*``,
@@ -6289,6 +6322,11 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
         if isinstance(frc, list):
             frc = ",".join(str(v) for v in frc)
         os.environ["DISCORD_FREE_RESPONSE_CHANNELS"] = str(frc)
+    cr = discord_cfg.get("call_roles")
+    if cr is not None and not os.getenv("DISCORD_CALL_ROLES"):
+        if isinstance(cr, list):
+            cr = ",".join(str(v) for v in cr)
+        os.environ["DISCORD_CALL_ROLES"] = str(cr)
     if "auto_thread" in discord_cfg and not os.getenv("DISCORD_AUTO_THREAD"):
         os.environ["DISCORD_AUTO_THREAD"] = str(discord_cfg["auto_thread"]).lower()
     if "reactions" in discord_cfg and not os.getenv("DISCORD_REACTIONS"):
@@ -6381,7 +6419,7 @@ def register(ctx) -> None:
         # ``discord:`` keys (require_mention, free_response_channels,
         # auto_thread, reactions, ignored_channels, allowed_channels,
         # no_thread_channels, allow_mentions.*, reply_to_mode,
-        # thread_require_mention) into ``DISCORD_*`` env vars that the
+        # thread_require_mention, call_roles) into ``DISCORD_*`` env vars that the
         # adapter reads via ``os.getenv()``.  Replaces the hardcoded block
         # that used to live in ``gateway/config.py``.  Hook contract: #24836.
         apply_yaml_config_fn=_apply_yaml_config,
