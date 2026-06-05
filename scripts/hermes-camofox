@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE="${CAMOFOX_ENV_FILE:-$HOME/.config/camofox/hermes.env}"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+fi
+
+export CAMOFOX_PORT="${CAMOFOX_PORT:-9377}"
+export CAMOFOX_PROFILE_DIR="${CAMOFOX_PROFILE_DIR:-$HOME/.local/state/hermes/camofox/profiles}"
+export CAMOFOX_COOKIES_DIR="${CAMOFOX_COOKIES_DIR:-$HOME/.local/state/hermes/camofox/cookies}"
+export CAMOFOX_TRACES_DIR="${CAMOFOX_TRACES_DIR:-$HOME/.local/state/hermes/camofox/traces}"
+export CAMOFOX_CRASH_REPORT_ENABLED="${CAMOFOX_CRASH_REPORT_ENABLED:-false}"
+
+mkdir -p "$CAMOFOX_PROFILE_DIR" "$CAMOFOX_COOKIES_DIR" "$CAMOFOX_TRACES_DIR"
+
+LOCAL_APT_LIBS="${CAMOFOX_LOCAL_APT_LIBS:-$HOME/.local/state/hermes/camofox/apt-libs}"
+if [[ -d "$LOCAL_APT_LIBS" ]]; then
+  for lib_dir in "$LOCAL_APT_LIBS"/*/usr/lib/x86_64-linux-gnu; do
+    [[ -d "$lib_dir" ]] || continue
+    export LD_LIBRARY_PATH="$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  done
+fi
+
+LOCAL_APT_VNC="${CAMOFOX_LOCAL_APT_VNC:-$HOME/.local/state/hermes/camofox/apt-vnc}"
+if [[ -d "$LOCAL_APT_VNC" ]]; then
+  for bin_dir in "$LOCAL_APT_VNC"/*/usr/bin; do
+    [[ -d "$bin_dir" ]] || continue
+    export PATH="$bin_dir:$PATH"
+  done
+  for lib_dir in "$LOCAL_APT_VNC"/*/usr/lib/x86_64-linux-gnu; do
+    [[ -d "$lib_dir" ]] || continue
+    export LD_LIBRARY_PATH="$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  done
+  for py_dir in "$LOCAL_APT_VNC"/*/usr/lib/python3/dist-packages; do
+    [[ -d "$py_dir" ]] || continue
+    export PYTHONPATH="$py_dir${PYTHONPATH:+:$PYTHONPATH}"
+  done
+  if [[ -z "${NOVNC_DIR:-}" ]]; then
+    for novnc_dir in "$LOCAL_APT_VNC"/*/usr/share/novnc; do
+      [[ -d "$novnc_dir" ]] || continue
+      export NOVNC_DIR="$novnc_dir"
+      break
+    done
+  fi
+fi
+
+export VNC_LOG_DIR="${VNC_LOG_DIR:-$HOME/.local/state/hermes/camofox/vnc-logs}"
+mkdir -p "$VNC_LOG_DIR"
+
+if [[ -n "${CAMOFOX_BROWSER_BIN:-}" ]]; then
+  exec "$CAMOFOX_BROWSER_BIN"
+fi
+
+if command -v camofox-browser >/dev/null 2>&1; then
+  exec camofox-browser
+fi
+
+HERMES_CAMOFOX_BIN="$HOME/.hermes/node/bin/camofox-browser"
+if [[ -x "$HERMES_CAMOFOX_BIN" ]]; then
+  exec "$HERMES_CAMOFOX_BIN"
+fi
+
+echo "camofox-browser not found; install @askjo/camofox-browser or set CAMOFOX_BROWSER_BIN" >&2
+exit 127
