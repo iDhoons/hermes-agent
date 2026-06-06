@@ -740,6 +740,10 @@ def load_gateway_config() -> GatewayConfig:
             if sr and isinstance(sr, dict):
                 gw_data["default_reset_policy"] = sr
 
+            rbt = yaml_cfg.get("reset_by_type")
+            if isinstance(rbt, dict):
+                gw_data["reset_by_type"] = rbt
+
             qc = yaml_cfg.get("quick_commands")
             if qc is not None:
                 if isinstance(qc, dict):
