@@ -83,10 +83,16 @@ def _detect_gate(snapshot: str) -> Optional[Dict[str, str]]:
             "status": "login_required",
             "message": "Naver login is required before continuing.",
         }
-    if any(token in text for token in ("권한", "가입", "멤버공개", "접근할 수 없습니다", "permission")):
+    if "등급 이상의 멤버만 볼 수 있" in text or "등급 이상만 이용" in text:
+        return {
+            "status": "grade_required",
+            "message": "This post requires a higher cafe membership grade.",
+        }
+    if any(p in text for p in ("카페에 가입하면", "멤버공개", "접근할 수 없습니다",
+                               "멤버에게만 공개", "멤버만 볼 수 있")):
         return {
             "status": "permission_required",
-            "message": "The cafe post or search result requires membership or additional permission.",
+            "message": "The cafe post requires membership or is member-only.",
         }
     return None
 
@@ -126,20 +132,50 @@ def _extract_article_links(raw_links: Any, max_results: int) -> List[Dict[str, s
     return results
 
 
+_SLUG_TO_CLUBID = {
+    "0404ab":     "18600855",
+    "kimyoooo":   "11289639",
+    "overseer":   "23700418",
+    "jaengid":    "21776715",
+    "pcarpenter": "17593353",
+}
+
+
+def _to_mobile_url(url: str) -> str:
+    """PC cafe.naver.com/<slug>/<id> → mobile /ca-fe/web/cafes/<clubid>/articles/<id>."""
+    import re as _re
+    m = _re.match(r'https?://cafe\.naver\.com/([A-Za-z0-9_]+)/(\d+)', url)
+    if m:
+        slug, article_id = m.group(1), m.group(2)
+        club_id = _SLUG_TO_CLUBID.get(slug, slug)
+        return f"https://m.cafe.naver.com/ca-fe/web/cafes/{club_id}/articles/{article_id}"
+    return url
+
+
+def _strip_cafe_chrome(snapshot: str) -> str:
+    """Remove nav/sidebar chrome before the article body (heading level=2 = post title)."""
+    import re as _re
+    m = _re.search(r'heading "[^"]+" \[level=2\]', snapshot)
+    if m:
+        return snapshot[m.start():]
+    return snapshot
+
+
 def _snapshot_excerpt(snapshot: str) -> str:
-    return (snapshot or "").strip()[:_MAX_EXCERPT_CHARS]
+    return _strip_cafe_chrome((snapshot or "").strip())[:_MAX_EXCERPT_CHARS]
 
 
 def _navigate_collect(url: str, task_id: Optional[str]) -> Dict[str, Any]:
     session = _get_session(task_id)
+    fetch_url = _to_mobile_url(url)
     if session.get("tab_id"):
         _post(
             f"/tabs/{session['tab_id']}/navigate",
-            {"userId": session["user_id"], "url": url},
+            {"userId": session["user_id"], "url": fetch_url},
             timeout=60,
         )
     else:
-        session = _ensure_tab(task_id, url)
+        session = _ensure_tab(task_id, fetch_url)
 
     tab_id = session["tab_id"]
     user_id = session["user_id"]

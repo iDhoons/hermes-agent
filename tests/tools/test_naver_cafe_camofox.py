@@ -32,6 +32,25 @@ def test_plain_login_link_is_not_treated_as_gate():
     assert ncc._detect_gate("검색 결과\n로그인\n카페글 보기") is None
 
 
+def test_detects_grade_gate_from_snapshot():
+    gate = ncc._detect_gate("감사회원 등급 이상의 멤버만 볼 수 있는 게시판 입니다.")
+    assert gate == {
+        "status": "grade_required",
+        "message": "This post requires a higher cafe membership grade.",
+    }
+
+
+def test_nav_join_link_is_not_treated_as_gate():
+    # "가입카페" is a nav link present on all cafe pages — must not trigger permission_required.
+    assert ncc._detect_gate("가입카페\n인기통 홈\n게시글 내용") is None
+
+
+def test_detects_membership_wall():
+    gate = ncc._detect_gate("카페에 가입하면 바로 글을 볼 수 있어요.")
+    assert gate is not None
+    assert gate["status"] == "permission_required"
+
+
 def test_extracts_and_limits_naver_cafe_article_links():
     links = [
         {"text": "first", "href": "https://cafe.naver.com/test/1"},
@@ -149,3 +168,39 @@ def test_extracts_cafe_search_tab_url_with_art_token():
     assert ncc._extract_article_links(links, max_results=3) == [
         {"title": "히로시마 맛집", "url": "https://cafe.naver.com/jpnstory/4298673?art=eyJhbGci"}
     ]
+
+
+def test_to_mobile_url_converts_pc_cafe_url_with_club_id():
+    # Known slugs use numeric club ID — Naver redirects slug URLs to the cafe home.
+    url = ncc._to_mobile_url("http://cafe.naver.com/0404ab/4162302")
+    assert "18600855" in url
+    assert "articles/4162302" in url
+    assert url.startswith("https://m.cafe.naver.com")
+
+
+def test_to_mobile_url_passes_through_non_cafe_url():
+    url = ncc._to_mobile_url("https://search.naver.com/search?q=test")
+    assert url == "https://search.naver.com/search?q=test"
+
+
+def test_strip_cafe_chrome_removes_nav_before_title():
+    snapshot = (
+        '- link "가입카페" [e1]:\n  - /url: "#"\n'
+        '- heading "합성목재 데크 후기" [level=2]\n'
+        '- paragraph: 안녕하세요 시공 후기입니다.\n'
+    )
+    stripped = ncc._strip_cafe_chrome(snapshot)
+    assert stripped.startswith('heading "합성목재 데크 후기"')
+    assert "가입카페" not in stripped
+
+
+def test_strip_cafe_chrome_returns_full_when_no_h2():
+    snapshot = '- link "홈" [e1]:\n  - /url: "#"\n- paragraph: 내용\n'
+    assert ncc._strip_cafe_chrome(snapshot) == snapshot
+
+
+def test_to_mobile_url_uses_club_id_for_known_slug():
+    # Slugs redirect to cafe home; only numeric club IDs reach the article.
+    url = ncc._to_mobile_url("http://cafe.naver.com/0404ab/4162302")
+    assert "18600855" in url
+    assert "articles/4162302" in url
