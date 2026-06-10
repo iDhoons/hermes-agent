@@ -2467,7 +2467,7 @@ class BasePlatformAdapter(ABC):
             # Text fallback: enable text-capture so the gateway intercept
             # picks up the user's typed reply (e.g. "2" or choice text).
             from tools.clarify_gateway import mark_awaiting_text
-            mark_awaiting_text(clarify_id)
+            mark_awaiting_text(clarify_id, numbered_choices=True)
         else:
             text = f"❓ {question}"
         return await self.send(

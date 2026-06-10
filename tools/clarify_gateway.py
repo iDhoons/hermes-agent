@@ -32,6 +32,7 @@ Two delivery paths from the adapter:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -54,6 +55,7 @@ class _ClarifyEntry:
     event: threading.Event = field(default_factory=threading.Event)
     response: Optional[str] = None
     awaiting_text: bool = False  # set when user picked "Other" or clarify is open-ended
+    numbered_choices: bool = False  # set when choices were rendered as a numbered text list
 
     def signature(self) -> Dict[str, object]:
         return {
@@ -147,6 +149,25 @@ def wait_for_response(clarify_id: str, timeout: float) -> Optional[str]:
 # Public API — gateway / adapter side
 # =========================================================================
 
+_NUMBERED_CHOICE_RE = re.compile(r"^\s*(\d+)\s*(?:[.)]|번)?\s*$")
+
+
+def _canonicalize_response(entry: _ClarifyEntry, response: str) -> str:
+    """Normalize numbered text-fallback replies without touching button choices."""
+    text = str(response) if response is not None else ""
+    text = text.strip()
+    if not (entry.awaiting_text and entry.numbered_choices and entry.choices):
+        return text
+
+    match = _NUMBERED_CHOICE_RE.match(text)
+    if not match:
+        return text
+    index = int(match.group(1)) - 1
+    if 0 <= index < len(entry.choices):
+        return str(entry.choices[index]).strip()
+    return text
+
+
 def resolve_gateway_clarify(clarify_id: str, response: str) -> bool:
     """Unblock the agent thread waiting on ``clarify_id``.
 
@@ -157,7 +178,7 @@ def resolve_gateway_clarify(clarify_id: str, response: str) -> bool:
         entry = _entries.get(clarify_id)
         if entry is None:
             return False
-    entry.response = str(response) if response is not None else ""
+    entry.response = _canonicalize_response(entry, response)
     entry.event.set()
     return True
 
@@ -180,8 +201,13 @@ def get_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
         return None
 
 
-def mark_awaiting_text(clarify_id: str) -> bool:
+def mark_awaiting_text(clarify_id: str, *, numbered_choices: bool = False) -> bool:
     """Flip an entry into text-capture mode (user picked the 'Other' button).
+
+    ``numbered_choices=True`` means a platform rendered choices as a numbered
+    text list, so replies like ``2`` should resolve to the second canonical
+    choice. Button-driven "Other" flows leave this false so custom text is
+    preserved verbatim.
 
     Returns True if the entry exists and was flipped, False otherwise.
     """
@@ -190,6 +216,7 @@ def mark_awaiting_text(clarify_id: str) -> bool:
         if entry is None:
             return False
         entry.awaiting_text = True
+        entry.numbered_choices = bool(numbered_choices)
         return True
 
 

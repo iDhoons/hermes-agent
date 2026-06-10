@@ -77,6 +77,7 @@ class TestClarifyPrimitive:
         pending = cm.get_pending_for_session("sk4")
         assert pending is not None
         assert pending.clarify_id == "id4"
+        assert pending.numbered_choices is False
 
     def test_mark_awaiting_text_unknown_id(self):
         """mark_awaiting_text on a non-existent id returns False."""
@@ -224,3 +225,36 @@ class TestGatewayTextIntercept:
         
         # Clean up
         cm.clear_session("sk-tf")
+
+    def test_numeric_text_reply_resolves_to_choice_text(self):
+        """Text-only multi-choice prompts should canonicalize number replies."""
+        from tools import clarify_gateway as cm
+
+        cm.register("id-num", "sk-num", "Pick one", ["Alpha", "Beta", "Gamma"])
+        cm.mark_awaiting_text("id-num", numbered_choices=True)
+
+        resolved = cm.resolve_gateway_clarify("id-num", "2")
+        assert resolved is True
+        result = cm.wait_for_response("id-num", timeout=0.1)
+        assert result == "Beta"
+
+    def test_numbered_text_reply_edge_cases(self):
+        """Only valid numbered replies are canonicalized; other text is preserved."""
+        from tools import clarify_gateway as cm
+
+        cases = [
+            ("2번", "Beta"),
+            ("2.", "Beta"),
+            ("99", "99"),
+            ("banana", "banana"),
+        ]
+        for idx, (raw, expected) in enumerate(cases):
+            clarify_id = f"id-edge-{idx}"
+            session_key = f"sk-edge-{idx}"
+            cm.register(clarify_id, session_key, "Pick one", ["Alpha", "Beta", "Gamma"])
+            cm.mark_awaiting_text(clarify_id, numbered_choices=True)
+
+            resolved = cm.resolve_gateway_clarify(clarify_id, raw)
+            assert resolved is True
+            result = cm.wait_for_response(clarify_id, timeout=0.1)
+            assert result == expected

@@ -1,14 +1,9 @@
-"""Tests for Discord clarify button rendering and resolution.
+"""Tests for Discord clarify rendering and resolution.
 
-Mirrors test_telegram_clarify_buttons.py for the Discord ``send_clarify``
-override and the ``ClarifyChoiceView`` callbacks. Discord uses ``discord.ui.View``
-button callbacks (closures) rather than a string-prefixed callback_query
-dispatcher like Telegram — the auth + resolution path is the same:
-
-  · numeric choice → resolve_gateway_clarify(clarify_id, choice_text)
-  · "Other" button → mark_awaiting_text(clarify_id) so the text-intercept
-    captures the next user message in this session
-  · already-resolved or unauthorized → ephemeral "this prompt..." reply
+Discord ``send_clarify`` intentionally renders text-only prompts: choices are
+shown as a numbered list in the embed and the gateway text-intercept captures
+the next user message. The legacy ``ClarifyChoiceView`` remains covered here so
+its callbacks do not regress while the class still exists in the adapter.
 """
 
 import sys
@@ -297,7 +292,10 @@ class TestDiscordSendClarify:
         _clear_clarify_state()
 
     @pytest.mark.asyncio
-    async def test_multi_choice_attaches_view(self):
+    async def test_multi_choice_sends_text_only_prompt(self):
+        from tools import clarify_gateway as cm
+
+        cm.register("cidM", "sk-M", "Pick a color", ["red", "green", "blue"])
         adapter = _make_adapter(allowed_users={"42"})
         channel = MagicMock()
         sent_msg = MagicMock()
@@ -315,14 +313,22 @@ class TestDiscordSendClarify:
 
         assert result.success is True
         assert result.message_id == "123456"
-        # Verify channel.send was called with embed + view kwargs
+        # Multi-choice prompts are text-only in Discord: no native buttons/view.
         channel.send.assert_called_once()
         kwargs = channel.send.call_args.kwargs
         assert "embed" in kwargs
-        assert "view" in kwargs
-        assert isinstance(kwargs["view"], ClarifyChoiceView)
-        # 3 choice buttons + 1 Other
-        assert len(kwargs["view"].children) == 4
+        assert "view" not in kwargs
+        embed = kwargs["embed"]
+        field_values = [field.get("value", "") for field in getattr(embed, "fields", [])]
+        assert any(
+            "1. red" in value and "2. green" in value and "3. blue" in value
+            for value in field_values
+        )
+        pending = cm.get_pending_for_session("sk-M")
+        assert pending is not None
+        assert pending.clarify_id == "cidM"
+        assert pending.awaiting_text is True
+        assert pending.numbered_choices is True
 
     @pytest.mark.asyncio
     async def test_open_ended_omits_view(self):
@@ -400,7 +406,8 @@ class TestDiscordSendClarify:
             session_key="sk-F",
         )
         kwargs = channel.send.call_args.kwargs
-        view = kwargs["view"]
-        # Only 1 real choice + 1 Other = 2 children
-        assert len(view.children) == 2
-        assert "real-choice" in view.children[0].label
+        assert "view" not in kwargs
+        embed = kwargs["embed"]
+        field_values = [field.get("value", "") for field in getattr(embed, "fields", [])]
+        assert any("real-choice" in value for value in field_values)
+        assert not any("1. " in value and "2. " in value for value in field_values)

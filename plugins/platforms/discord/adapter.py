@@ -4155,17 +4155,15 @@ class DiscordAdapter(BasePlatformAdapter):
         session_key: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Render a clarify prompt with one Discord button per choice.
+        """Render a Discord clarify prompt as text only.
 
-        Multi-choice mode (``choices`` non-empty): renders a button per option
-        plus a final "✏️ Other (type answer)" button. Picking "Other" flips
-        the clarify entry into text-capture mode so the next user message in
-        the session becomes the response. Numeric clicks resolve immediately
-        via ``resolve_gateway_clarify(clarify_id, choice_text)``.
+        Multi-choice mode (``choices`` non-empty): renders a numbered list in
+        the embed and enables the gateway text-intercept. The user replies with
+        a number, option text, or custom text; no Discord buttons are attached.
 
         Open-ended mode (``choices`` empty/None): renders the question as
-        plain embed text — no buttons. The gateway's text-intercept captures
-        the next message in this session and resolves the clarify.
+        plain embed text. The gateway's text-intercept captures the next
+        message in this session and resolves the clarify.
         """
         if not self._client or not DISCORD_AVAILABLE:
             return SendResult(success=False, error="Not connected")
@@ -4194,33 +4192,37 @@ class DiscordAdapter(BasePlatformAdapter):
             clean_choices = [
                 str(c).strip() for c in (choices or []) if c is not None and str(c).strip()
             ]
-            # Discord allows up to 5 buttons per row, 5 rows per view = 25.
-            # We reserve one slot for the "Other" button, so cap at 24 choices.
             clean_choices = clean_choices[:24]
 
             if clean_choices:
+                choice_text = "\n".join(
+                    f"{i}. {choice}" for i, choice in enumerate(clean_choices, start=1)
+                )
+                if len(choice_text) > 1024:
+                    choice_text = choice_text[:1021] + "..."
                 embed.add_field(
                     name="Choices",
-                    value="Pick one below, or click ✏️ Other to type a custom answer.",
+                    value=choice_text,
                     inline=False,
                 )
-                view = ClarifyChoiceView(
-                    choices=clean_choices,
-                    clarify_id=clarify_id,
-                    allowed_user_ids=self._allowed_user_ids,
-                    allowed_role_ids=self._allowed_role_ids,
+                embed.add_field(
+                    name="Reply",
+                    value="Reply with the number, option text, or your own answer.",
+                    inline=False,
                 )
+                try:
+                    from tools.clarify_gateway import mark_awaiting_text
+                    mark_awaiting_text(clarify_id, numbered_choices=True)
+                except Exception as exc:
+                    logger.warning("[%s] mark_awaiting_text failed: %s", self.name, exc)
             else:
                 embed.add_field(
                     name="Reply",
                     value="Reply in this channel with your answer.",
                     inline=False,
                 )
-                view = None
 
-            msg = await channel.send(embed=embed, view=view) if view else await channel.send(embed=embed)
-            if view:
-                view._message = msg  # store for on_timeout expiration editing
+            msg = await channel.send(embed=embed)
             return SendResult(success=True, message_id=str(msg.id))
         except Exception as e:
             logger.warning("[%s] send_clarify failed: %s", self.name, e)
