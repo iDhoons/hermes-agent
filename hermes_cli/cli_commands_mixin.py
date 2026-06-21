@@ -2053,7 +2053,7 @@ class CLICommandsMixin:
             return
 
         if lower in {"clear", "stop", "done"}:
-            had = mgr.has_goal()
+            had = mgr.has_goal() or mgr.has_pending_draft()
             mgr.clear()
             if had:
                 _cprint("  ✓ Goal cleared.")
@@ -2096,41 +2096,61 @@ class CLICommandsMixin:
         # Otherwise treat the arg as the goal text. Inline `field: value`
         # lines (verify:, constraints:, boundaries:, stop when:) are parsed
         # into a completion contract; the remaining prose is the headline.
-        # A plain free-form goal with no such lines behaves exactly as before.
+        # A plain free-form goal with no such lines becomes a pending Goal
+        # Packet too; the autonomous loop starts only after approval.
         from hermes_cli.goals import parse_contract
 
         headline, contract = parse_contract(arg)
         goal_text = headline or arg
+        # Otherwise treat the arg as a draft that needs natural-language approval.
         try:
-            state = mgr.set(goal_text, contract=contract if not contract.is_empty() else None)
+            from hermes_cli.goals import render_goal_draft_notice
+            draft = mgr.draft(
+                goal_text,
+                contract=contract if not contract.is_empty() else None,
+            )
         except ValueError as exc:
             _cprint(f"  Invalid goal: {exc}")
             return
 
-        _cprint(f"  ⊙ Goal set ({state.max_turns}-turn budget): {state.goal}")
-        if state.has_contract():
-            _cprint(f"  {_DIM}Completion contract:{_RST}")
-            for line in state.contract.render_block().splitlines():
-                _cprint(f"    {line}")
-        _cprint(
-            f"  {_DIM}After each turn, a judge model checks if the goal is done"
-            f"{' against the contract above' if state.has_contract() else ''}. "
-            f"Hermes keeps working until it is, you pause/clear it, or the budget is "
-            f"exhausted. Use /goal status, /goal show, /goal pause, /goal resume, /goal clear.{_RST}"
-        )
-        # Kick the loop off immediately so the user doesn't have to send a
-        # separate message after setting the goal.
-        try:
-            self._pending_input.put(state.goal)
-        except Exception:
-            pass
+        _cprint(render_goal_draft_notice(draft))
+
+    def _maybe_handle_goal_draft_reply(self, user_input: str) -> bool:
+        """Consume natural-language replies to a pending Goal Packet.
+
+        Returns True when the input was handled as approve/edit/cancel instead
+        of being sent to the agent as normal chat.
+        """
+        from cli import _cprint, _looks_like_slash_command
+
+        if not isinstance(user_input, str) or _looks_like_slash_command(user_input):
+            return False
+        mgr = self._get_goal_manager()
+        if mgr is None or not mgr.has_pending_draft():
+            return False
+        result = mgr.handle_draft_reply(user_input)
+        action = result.get("action")
+        if action == "none":
+            return False
+        message = result.get("message") or ""
+        if message:
+            _cprint(message)
+        if action == "approve":
+            state = result.get("state")
+            goal_text = getattr(state, "goal", "")
+            if goal_text:
+                try:
+                    self._pending_input.put(goal_text)
+                except Exception:
+                    pass
+        return True
 
     def _handle_goal_draft(self, objective: str) -> None:
         """Draft a structured completion contract from a plain objective and
-        set it as the active goal. Falls back to a bare goal if the aux model
-        can't produce a contract."""
+        present it as a pending Goal Packet. Falls back to a bare packet if
+        the aux model can't produce a contract."""
         from cli import _DIM, _RST, _cprint
-        from hermes_cli.goals import draft_contract
+        from hermes_cli.goals import draft_contract, render_goal_draft_notice
 
         mgr = self._get_goal_manager()
         if mgr is None:
@@ -2146,30 +2166,17 @@ class CLICommandsMixin:
             contract = None
 
         try:
-            state = mgr.set(objective, contract=contract)
+            draft = mgr.draft(objective, contract=contract)
         except ValueError as exc:
             _cprint(f"  Invalid goal: {exc}")
             return
 
-        _cprint(f"  ⊙ Goal set ({state.max_turns}-turn budget): {state.goal}")
-        if state.has_contract():
-            _cprint(f"  {_DIM}Drafted completion contract:{_RST}")
-            for line in state.contract.render_block().splitlines():
-                _cprint(f"    {line}")
-            _cprint(
-                f"  {_DIM}Tighten any field by re-setting the goal with inline "
-                f"lines (e.g. verify: <command>), then /goal resume. "
-                f"Use /goal show to review.{_RST}"
-            )
-        else:
+        _cprint(render_goal_draft_notice(draft))
+        if contract is None or contract.is_empty():
             _cprint(
                 f"  {_DIM}Couldn't draft a contract (aux model unavailable) — "
-                f"running as a free-form goal. The per-turn judge still applies.{_RST}"
+                f"approval will start a free-form goal packet.{_RST}"
             )
-        try:
-            self._pending_input.put(state.goal)
-        except Exception:
-            pass
 
     def _handle_subgoal_command(self, cmd: str) -> None:
         """Dispatch /subgoal subcommands.
