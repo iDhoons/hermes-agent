@@ -1,0 +1,133 @@
+{
+  "schema_version": "authority-registry-v0",
+  "_note": "Thin routing registry. Holds POINTERS + probe specs + policy text only. It never copies current truth (state is fetched live by probes at build time). Add a new domain by adding a key under 'domains'; do not widen an existing domain to own things it does not.",
+  "roots": {
+    "vault": "/home/idhoons/Obsidian",
+    "home": "/home/idhoons"
+  },
+  "domains": {
+    "business.floow": {
+      "owner": "hermes",
+      "confidence": "low",
+      "intent_authority": [
+        {"path": "{vault}/Projects/Floow/Floow.md", "owns": "floow product intent / backlog"},
+        {"path": "{home}/.claude/infra/operating-model.md", "owns": "operating model / agent routing"}
+      ],
+      "state_probes": [
+        {"name": "floow_intent_staleness", "kind": "file_staleness", "path": "{vault}/Projects/Floow/Floow.md"},
+        {"name": "today_briefing_view", "kind": "file_read", "path": "{home}/.local/share/tmux-today-briefing/current.md", "summary_lines": 3}
+      ],
+      "views": {
+        "allowed": [
+          {"name": "today-briefing", "path": "{home}/.local/share/tmux-today-briefing/current.md"}
+        ],
+        "not_authority": [
+          "WPC / deck product state - business.floow does NOT own WPC/deck. A real wpc.* or deck.* domain owns those; keep them separate.",
+          "today-briefing is a derived view, not floow intent authority"
+        ]
+      },
+      "history_policy": {"default": "exclude", "allowed_when": ["explicitly auditing past floow decisions"]},
+      "defaults_and_guards": [
+        "Floow.md is manually maintained - cross-check against the live backlog before treating any line as current execution state."
+      ],
+      "do_not": [
+        "Do NOT surface WPC/deck as floow's 'current' work - they belong to a separate domain.",
+        "Do NOT treat an aging manual Floow.md as live execution status."
+      ],
+      "recommended_use": "Scope reasoning to floow product intent only; confirm the current phase against the live backlog, not this doc's age."
+    },
+    "paperclip.issue": {
+      "owner": "hermes",
+      "confidence": "medium",
+      "intent_authority": [
+        {"path": "{home}/.claude/infra/operating-model.md", "owns": "Paperclip routing / agent ownership (#paperclip)"},
+        {"path": "{vault}/_AgentData/memory/long-term.md", "owns": "active agent set / Paperclip role"}
+      ],
+      "state_probes": [
+        {"name": "paperclip_health", "kind": "http_health", "url": "http://127.0.0.1:3101/api/health"},
+        {"name": "paperclip_service", "kind": "systemctl_active", "units": ["paperclip"]},
+        {"name": "company_goals_ambiguity", "kind": "command_plan", "command": "GET http://127.0.0.1:3101/api/companies/<id>/goals (read-only) - inspect active root goals and createdAt to detect ambiguous default", "why": "Detect >1 active root goal or non-active default before any routing decision. NOT executed in read-only Phase 0."}
+      ],
+      "views": {
+        "allowed": [
+          {"name": "ops-watch", "path": "{vault}/_Wiki/.data/ops-watch/current.json"}
+        ],
+        "not_authority": [
+          "hermes-paperclip-operating-protocol.md (v0.1, stale) is a procedure draft, not current routing truth"
+        ]
+      },
+      "history_policy": {"default": "reference_only", "allowed_when": ["auditing how a past issue was routed"]},
+      "defaults_and_guards": [
+        "Server default company goal = oldest active root goal by createdAt (services/goals.ts). If there is >1 active root goal, or the default's status != active, the default is AMBIGUOUS.",
+        "Goal fallback code change is Phase 2 - this packet only SURFACES the policy, it does not enforce it."
+      ],
+      "do_not": [
+        "Do NOT attach a default deck/WPC goal to an ambiguous issue.",
+        "When projectId/goalId/parentId are all absent, require an explicit goalId or leave goalId=null (needs-triage) - never inherit the stale company default."
+      ],
+      "recommended_use": "For an ambiguous issue, require an explicit goalId or mark needs-triage; never silently inherit the default company goal."
+    },
+    "daily-focus": {
+      "owner": "hermes",
+      "confidence": "low",
+      "intent_authority": [
+        {"path": "{vault}/_DailyNotes/{year_month}/{date}.md", "owns": "today's stated intent (often a missing/empty template)"},
+        {"path": "{vault}/Projects/Floow/Floow.md", "owns": "standing product focus"}
+      ],
+      "state_probes": [
+        {"name": "today_briefing", "kind": "file_read", "path": "{home}/.local/share/tmux-today-briefing/current.md", "summary_lines": 5},
+        {"name": "today_daily_note", "kind": "file_staleness", "path": "{vault}/_DailyNotes/{year_month}/{date}.md"},
+        {"name": "pim_today_tasks", "kind": "command_plan", "command": "sqlite3 'file:{home}/.local/share/pim/secretary.db?mode=ro' \"SELECT title,due FROM tasks WHERE date(due)=date('now','localtime')\"", "why": "Live PIM evidence for today. Read-only; not executed in Phase 0."},
+        {"name": "calendar_today", "kind": "command_plan", "command": "<read-only calendar query for today's events>", "why": "Live calendar evidence for today. Not executed in Phase 0."}
+      ],
+      "views": {
+        "allowed": [
+          {"name": "today-briefing", "path": "{home}/.local/share/tmux-today-briefing/current.md"}
+        ],
+        "not_authority": [
+          "An empty or missing _DailyNotes template is NOT today's intent"
+        ]
+      },
+      "history_policy": {"default": "exclude", "allowed_when": ["reviewing prior days' focus on request"]},
+      "defaults_and_guards": [
+        "Today's _DailyNotes file is frequently missing or an empty template - it must not be read as confirmed intent."
+      ],
+      "do_not": [
+        "Do NOT infer today's focus from an empty or missing daily note.",
+        "Require PIM tasks + calendar + live briefing evidence; if those are unavailable, say focus is unconfirmed rather than guessing."
+      ],
+      "recommended_use": "Derive today's focus only from confirmed PIM/calendar/live-briefing evidence; explicitly flag when that evidence is missing."
+    },
+    "infra.hermes": {
+      "owner": "hermes",
+      "confidence": "high",
+      "intent_authority": [
+        {"path": "{home}/.claude/infra/operating-model.md", "owns": "operating model / control-plane intent"},
+        {"path": "{vault}/_Wiki/infrastructure/linux-operations-guide.md", "owns": "linux ops guide (may lag live state)"}
+      ],
+      "state_probes": [
+        {"name": "services_active", "kind": "systemctl_active", "units": ["hermes", "paperclip", "syncthing", "obsidian-quartz-serve"]},
+        {"name": "ops_watch", "kind": "json_view", "path": "{vault}/_Wiki/.data/ops-watch/current.json", "fields": ["overall_status", "check_date", "generated_at"]},
+        {"name": "facts_watch", "kind": "json_view", "path": "{vault}/_AgentData/v2/reports/facts-watch/current.json", "fields": ["schema_version", "generated_at"]}
+      ],
+      "views": {
+        "allowed": [
+          {"name": "ops-watch", "path": "{vault}/_Wiki/.data/ops-watch/current.json"},
+          {"name": "facts-watch", "path": "{vault}/_AgentData/v2/reports/facts-watch/current.json"}
+        ],
+        "not_authority": [
+          "linux-operations-guide.md wiki text may be stale (e.g. Syncthing restart) - live probe wins over the doc"
+        ]
+      },
+      "history_policy": {"default": "reference_only", "allowed_when": ["investigating a past incident"]},
+      "defaults_and_guards": [
+        "Live infra state = systemctl is-active + ops-watch probe, NOT the wiki/operating-model prose."
+      ],
+      "do_not": [
+        "Do NOT trust wiki/operating-model text over live systemctl/ops-watch state (e.g. Syncthing on/off).",
+        "Do NOT restart services or mutate state - this domain is read-only diagnosis."
+      ],
+      "recommended_use": "Confirm infra state from live probes (systemctl/ops-watch); treat docs as intent only and prefer the probe when they disagree."
+    }
+  }
+}
