@@ -22,6 +22,7 @@ Optional env vars:
 """
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -64,6 +65,7 @@ _TRACE_STATE: Dict[str, TraceState] = {}
 # to bound the leak from non-finalizing turns, not to limit concurrency.
 _MAX_TRACE_STATE = 256
 _LANGFUSE_CLIENT = None
+_ATEXIT_REGISTERED = False
 _READ_FILE_LINE_RE = re.compile(r"^\s*(\d+)\|(.*)$")
 _READ_FILE_HEAD_LINES = 25
 _READ_FILE_TAIL_LINES = 15
@@ -728,10 +730,41 @@ def _evict_stale_locked() -> None:
     stale = sorted(_TRACE_STATE.items(), key=lambda kv: kv[1].last_updated_at)[:over]
     for key, state in stale:
         _TRACE_STATE.pop(key, None)
+        _close_trace_state(state)
+
+
+def _close_trace_state(state: TraceState, *, output: Any = None) -> None:
+    for observation in state.generations.values():
+        _end_observation(observation)
+    for observation in state.tools.values():
+        _end_observation(observation)
+    for queue in state.pending_tools_by_name.values():
+        for observation in queue:
+            _end_observation(observation)
+
+    final_output = _merge_trace_output(output, state)
+    root_span = state.root_span
+    if root_span is not None and final_output is not None:
         try:
-            state.root_span.end()
+            root_span.set_trace_io(output=final_output)
+            root_span.update(output=final_output)
         except Exception as exc:  # pragma: no cover - fail-open
-            _debug(f"evict stale trace failed: {exc}")
+            _debug(f"update root trace output failed: {exc}")
+
+    if root_span is not None:
+        try:
+            root_span.end()
+        except Exception as exc:  # pragma: no cover - fail-open
+            _debug(f"end root trace failed: {exc}")
+
+    root_ctx = state.root_ctx
+    if root_ctx is not None:
+        try:
+            exit_fn = getattr(root_ctx, "__exit__", None)
+            if exit_fn is not None:
+                exit_fn(None, None, None)
+        except Exception as exc:  # pragma: no cover - fail-open
+            _debug(f"close root trace context failed: {exc}")
 
 
 def _finish_trace(task_key: str, *, output: Any = None) -> None:
@@ -745,21 +778,26 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
         return
 
     try:
-        for observation in state.generations.values():
-            _end_observation(observation)
-        for observation in state.tools.values():
-            _end_observation(observation)
-        for queue in state.pending_tools_by_name.values():
-            for observation in queue:
-                _end_observation(observation)
-        final_output = _merge_trace_output(output, state)
-        if final_output is not None:
-            state.root_span.set_trace_io(output=final_output)
-            state.root_span.update(output=final_output)
-        state.root_span.end()
+        _close_trace_state(state, output=output)
     except Exception as exc:  # pragma: no cover - fail-open
         _debug(f"finish trace failed: {exc}")
     finally:
+        try:
+            client.flush()
+        except Exception:
+            pass
+
+
+def shutdown_langfuse() -> None:
+    with _STATE_LOCK:
+        states = list(_TRACE_STATE.values())
+        _TRACE_STATE.clear()
+
+    for state in states:
+        _close_trace_state(state)
+
+    client = _LANGFUSE_CLIENT
+    if client is not None and client is not _INIT_FAILED:
         try:
             client.flush()
         except Exception:
@@ -1126,6 +1164,11 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
 
 
 def register(ctx) -> None:
+    global _ATEXIT_REGISTERED
+    if not _ATEXIT_REGISTERED:
+        atexit.register(shutdown_langfuse)
+        _ATEXIT_REGISTERED = True
+
     # Register for both hook name variants so the plugin works across
     # Hermes versions.  pre_api_request / post_api_request fire per API
     # call (preferred); pre_llm_call / post_llm_call fire once per turn.

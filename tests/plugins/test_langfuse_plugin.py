@@ -415,6 +415,121 @@ class TestTurnTraceIsolation:
         assert tk("t", "s", turn_id="u", api_request_id="r") == "task:t:turn:u"
 
 
+class TestTraceShutdown:
+    def _fresh_plugin(self):
+        sys.modules.pop("plugins.observability.langfuse", None)
+        return importlib.import_module("plugins.observability.langfuse")
+
+    def test_finish_trace_closes_root_context_and_flushes(self, monkeypatch):
+        mod = self._fresh_plugin()
+
+        class _Observation:
+            def __init__(self):
+                self.ended = False
+
+            def update(self, **kw):
+                pass
+
+            def end(self):
+                self.ended = True
+
+        class _RootSpan:
+            def __init__(self):
+                self.ended = False
+                self.output = None
+
+            def set_trace_io(self, **kw):
+                self.output = kw.get("output")
+
+            def update(self, **kw):
+                self.output = kw.get("output")
+
+            def end(self):
+                self.ended = True
+
+        class _RootContext:
+            def __init__(self):
+                self.exited = False
+
+            def __exit__(self, *exc):
+                self.exited = True
+                return False
+
+        class _Client:
+            def __init__(self):
+                self.flushed = False
+
+            def flush(self):
+                self.flushed = True
+
+        observation = _Observation()
+        root_span = _RootSpan()
+        root_ctx = _RootContext()
+        client = _Client()
+        monkeypatch.setattr(mod, "_get_langfuse", lambda: client)
+
+        state = mod.TraceState(
+            trace_id="trace-1",
+            root_ctx=root_ctx,
+            root_span=root_span,
+        )
+        state.generations["1"] = observation
+        monkeypatch.setitem(mod._TRACE_STATE, "task-1", state)
+
+        mod._finish_trace("task-1", output={"content": "done"})
+
+        assert observation.ended is True
+        assert root_span.ended is True
+        assert root_ctx.exited is True
+        assert root_span.output == {"content": "done"}
+        assert client.flushed is True
+        assert "task-1" not in mod._TRACE_STATE
+
+    def test_shutdown_langfuse_closes_lingering_traces_without_reinitializing_client(self, monkeypatch):
+        mod = self._fresh_plugin()
+
+        class _RootSpan:
+            def __init__(self):
+                self.ended = False
+
+            def end(self):
+                self.ended = True
+
+        class _RootContext:
+            def __init__(self):
+                self.exited = False
+
+            def __exit__(self, *exc):
+                self.exited = True
+                return False
+
+        class _Client:
+            def __init__(self):
+                self.flushed = False
+
+            def flush(self):
+                self.flushed = True
+
+        root_span = _RootSpan()
+        root_ctx = _RootContext()
+        client = _Client()
+        monkeypatch.setattr(mod, "_LANGFUSE_CLIENT", client)
+
+        state = mod.TraceState(
+            trace_id="trace-1",
+            root_ctx=root_ctx,
+            root_span=root_span,
+        )
+        monkeypatch.setitem(mod._TRACE_STATE, "task-1", state)
+
+        mod.shutdown_langfuse()
+
+        assert root_span.ended is True
+        assert root_ctx.exited is True
+        assert client.flushed is True
+        assert mod._TRACE_STATE == {}
+
+
 # ---------------------------------------------------------------------------
 # Placeholder-credential guard (#23823).
 #
