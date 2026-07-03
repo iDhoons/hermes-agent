@@ -7217,6 +7217,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # engages drain on the first tick.
         asyncio.create_task(self._drain_control_watcher())
 
+        # Start tmux job watcher — observes /tmux-launched Codex/Claude panes
+        # and notifies the originating chat on input-needed/completion states.
+        asyncio.create_task(self._tmux_job_watcher())
+
         logger.info("Press Ctrl+C to stop")
         
         return True
@@ -9174,6 +9178,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _cmd_def_inner and _cmd_def_inner.name == "background":
                 return await self._handle_background_command(event)
 
+            if _cmd_def_inner and _cmd_def_inner.name == "tmux":
+                return await self._handle_tmux_command(event)
+
+            if _cmd_def_inner and _cmd_def_inner.name in {"tmux_codex", "tmux_claude"}:
+                agent = "codex" if _cmd_def_inner.name == "tmux_codex" else "claude"
+                return await self._handle_tmux_command(event, agent=agent)
+
             # /kanban must bypass the guard. It writes to a profile-agnostic
             # DB (kanban.db), not to the running agent's state. In fact
             # /kanban unblock is often the only way to free a worker that
@@ -9694,6 +9705,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "background":
             return await self._handle_background_command(event)
+
+        if canonical == "tmux":
+            return await self._handle_tmux_command(event)
+
+        if canonical in {"tmux_codex", "tmux_claude"}:
+            agent = "codex" if canonical == "tmux_codex" else "claude"
+            return await self._handle_tmux_command(event, agent=agent)
 
         if canonical == "steer":
             # No active agent — /steer has no tool call to inject into.

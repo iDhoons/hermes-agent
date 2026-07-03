@@ -101,6 +101,15 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, args_hint="[all] [reason]"),
     CommandDef("background", "Run a prompt in the background", "Session",
                aliases=("bg", "btw"), args_hint="<prompt>"),
+    CommandDef("tmux", "Run or manage an agent job in tmux", "Session",
+               gateway_only=True,
+               args_hint="[list|status|read <job|%pane>|send <job|%pane> <text>|--agent claude|--xhigh] <prompt>"),
+    CommandDef("tmux_codex", "Run a Codex job in tmux", "Session",
+               gateway_only=True,
+               args_hint="[--low|--medium|--high|--xhigh] [--model <model>] <prompt>"),
+    CommandDef("tmux_claude", "Run a Claude job in tmux", "Session",
+               gateway_only=True,
+               args_hint="[--low|--medium|--high|--xhigh|--max] [--model <model>] <prompt>"),
     CommandDef("agents", "Show active agents and running tasks", "Session",
                aliases=("tasks",)),
     CommandDef("journey", "Open the learning journey timeline",
@@ -379,6 +388,9 @@ ACTIVE_SESSION_BYPASS_COMMANDS: frozenset[str] = frozenset(
         "status",
         "steer",
         "stop",
+        "tmux",
+        "tmux_claude",
+        "tmux_codex",
         "update",
         "version",
     }
@@ -1163,7 +1175,18 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #   - moa: high-cost slash mode, available through /hermes moa to avoid
 #     displacing existing native Slack slash commands at the 50-command cap.
 #   - debug: the log/report upload surface; reached via /hermes debug on Slack.
-_SLACK_VIA_HERMES_ONLY = frozenset({"credits", "billing", "moa", "debug"})
+#   - start: platform ping/handshake; Slack does not need a native /start slot.
+#   - tmux_codex/tmux_claude: launch shortcuts remain gateway commands, while
+#     the tmux management surface keeps the native Slack /tmux slot.
+_SLACK_VIA_HERMES_ONLY = frozenset({
+    "credits",
+    "billing",
+    "moa",
+    "debug",
+    "start",
+    "tmux_codex",
+    "tmux_claude",
+})
 
 
 def _sanitize_slack_name(raw: str) -> str:

@@ -2627,6 +2627,222 @@ class GatewaySlashCommandsMixin:
         preview = prompt[:60] + ("..." if len(prompt) > 60 else "")
         return t("gateway.background.started", preview=preview, task_id=task_id)
 
+    def _tmux_job_registry(self):
+        manager = getattr(self, "_tmux_jobs", None)
+        if manager is None:
+            from gateway.tmux_jobs import TmuxJobRegistry
+            manager = TmuxJobRegistry()
+            self._tmux_jobs = manager
+        return manager
+
+    async def _handle_tmux_command(self, event: MessageEvent, agent: str | None = None) -> str:
+        """Handle /tmux — launch and supervise a tmux-backed agent job."""
+        from gateway.tmux_jobs import (
+            build_worker_prompt,
+            parse_start_args,
+            parse_tmux_command_args,
+        )
+
+        manager = self._tmux_job_registry()
+        raw_args = event.get_command_args().strip()
+        subcommand, rest = parse_tmux_command_args(raw_args) if agent is None else ("start", raw_args)
+
+        if subcommand == "help":
+            return self._tmux_usage()
+
+        if subcommand == "list":
+            return self._format_tmux_job_list(manager.load())
+
+        if subcommand == "status":
+            try:
+                manager.poll_all()
+            except Exception as exc:
+                return f"Could not refresh tmux job status: {exc}"
+            return self._format_tmux_job_list(manager.load())
+
+        if subcommand == "read":
+            target = rest.split(maxsplit=1)[0] if rest else ""
+            if not target:
+                return "Usage: /tmux read <job|%pane>"
+            record = manager.find(target)
+            if record is None and not target.startswith("%"):
+                return f"No tmux job found for `{target}`."
+            try:
+                tail = manager.read_tail(target, lines=80)
+            except Exception as exc:
+                return f"Could not read tmux pane `{target}`: {exc}"
+            header = f"tmux pane {record.pane_id if record else target}"
+            if record:
+                header = f"tmux job {record.id} ({record.agent}, {record.pane_id})"
+            return f"{header}\n\n```text\n{tail[-3500:]}\n```"
+
+        if subcommand == "send":
+            parts = rest.split(maxsplit=1)
+            if len(parts) < 2:
+                return "Usage: /tmux send <job|%pane> <text>"
+            target, text = parts
+            record = manager.find(target)
+            if record is None:
+                return f"No tmux job found for `{target}`."
+            try:
+                manager.send(record, build_worker_prompt(text))
+            except Exception as exc:
+                return f"Could not send to tmux job `{record.id}`: {exc}"
+            return f"Sent to tmux job `{record.id}` ({record.pane_id})."
+
+        try:
+            spec = parse_start_args(raw_args, default_agent=agent or "codex")
+        except ValueError as exc:
+            return str(exc)
+        if not spec.prompt:
+            return self._tmux_usage()
+
+        source = event.source
+        workdir = os.environ.get("TERMINAL_CWD") or os.getcwd()
+        event_message_id = self._reply_anchor_for_event(event)
+        try:
+            record = manager.start_job(
+                agent=spec.agent,
+                prompt=spec.prompt,
+                effort=spec.effort,
+                model=spec.model,
+                workdir=workdir,
+                platform=source.platform.value if source.platform else "",
+                chat_id=str(source.chat_id or ""),
+                thread_id=str(source.thread_id or ""),
+                chat_type=str(getattr(source, "chat_type", "") or ""),
+                user_id=str(source.user_id or ""),
+                user_name=str(source.user_name or ""),
+                reply_to_message_id=str(event_message_id or ""),
+            )
+        except Exception as exc:
+            return f"Could not start tmux job: {exc}"
+        return self._format_tmux_job_started(record)
+
+    def _tmux_usage(self) -> str:
+        return (
+            "Usage:\n"
+            "  /tmux_codex [--low|--medium|--high|--xhigh] [--model <model>] <prompt>\n"
+            "  /tmux_claude [--low|--medium|--high|--xhigh|--max] [--model <model>] <prompt>\n"
+            "  /tmux [--agent codex|claude] [--xhigh] <prompt>\n"
+            "  /tmux list\n"
+            "  /tmux status\n"
+            "  /tmux read <job|%pane>\n"
+            "  /tmux send <job|%pane> <text>"
+        )
+
+    def _format_tmux_job_started(self, record) -> str:
+        opts = []
+        if getattr(record, "effort", ""):
+            opts.append(f"effort={record.effort}")
+        if getattr(record, "model", ""):
+            opts.append(f"model={record.model}")
+        suffix = f" ({', '.join(opts)})" if opts else ""
+        return (
+            f"Started tmux job `{record.id}` with {record.agent}{suffix}.\n"
+            f"tmux: `tmux attach -t {record.tmux_session}` -> window `{record.window_name}` "
+            f"pane `{record.pane_id}`\n"
+            f"Read: `/tmux read {record.id}`\n"
+            f"Send: `/tmux send {record.id} <text>`"
+        )
+
+    def _format_tmux_job_list(self, records) -> str:
+        if not records:
+            return "No tmux jobs registered yet."
+        lines = ["tmux jobs:"]
+        for record in records[-20:]:
+            opts = []
+            if getattr(record, "effort", ""):
+                opts.append(record.effort)
+            if getattr(record, "model", ""):
+                opts.append(record.model)
+            option_text = f" ({', '.join(opts)})" if opts else ""
+            lines.append(
+                f"- `{record.id}` {record.status} {record.agent} "
+                f"{record.pane_id}{option_text} window `{record.window_name}`"
+            )
+        return "\n".join(lines)
+
+    async def _tmux_job_watcher(self, interval: float = 5.0) -> None:
+        while getattr(self, "_running", False):
+            try:
+                await self._run_tmux_job_watcher_once()
+            except Exception:
+                logger.debug("tmux job watcher tick failed", exc_info=True)
+            await asyncio.sleep(interval)
+
+    async def _run_tmux_job_watcher_once(self) -> int:
+        manager = self._tmux_job_registry()
+        try:
+            changes = manager.poll_all()
+        except Exception:
+            logger.debug("tmux job poll failed", exc_info=True)
+            return 0
+        sent = 0
+        for change in changes:
+            status = change.snapshot.status
+            if status not in {"ask", "ok", "failed", "dead"}:
+                continue
+            record = change.record
+            if (
+                record.last_notified_status == status
+                and record.last_notified_marker == change.snapshot.marker
+            ):
+                continue
+            if await self._notify_tmux_job_status(change):
+                manager.mark_notified(record.id, status)
+                sent += 1
+        return sent
+
+    async def _notify_tmux_job_status(self, change) -> bool:
+        from gateway.config import Platform
+        from gateway.run import _non_conversational_metadata
+
+        record = change.record
+        if not record.platform or not record.chat_id:
+            return False
+        try:
+            platform = Platform(record.platform)
+        except Exception:
+            return False
+        adapter = self.adapters.get(platform) if getattr(self, "adapters", None) else None
+        if adapter is None:
+            return False
+        metadata = self._thread_metadata_for_target(
+            platform,
+            record.chat_id,
+            record.thread_id or None,
+            chat_type=record.chat_type or None,
+            reply_to_message_id=record.reply_to_message_id or None,
+            adapter=adapter,
+        )
+        metadata = _non_conversational_metadata(metadata, platform=platform)
+        await adapter.send(
+            record.chat_id,
+            self._format_tmux_job_notification(change),
+            metadata=metadata,
+        )
+        return True
+
+    def _format_tmux_job_notification(self, change) -> str:
+        record = change.record
+        status = change.snapshot.status
+        labels = {
+            "ask": "needs user input",
+            "ok": "completed",
+            "failed": "failed or blocked",
+            "dead": "pane closed",
+        }
+        summary = change.snapshot.summary.strip()
+        return (
+            f"tmux job `{record.id}` {labels.get(status, status)}.\n"
+            f"Agent: {record.agent} | pane: `{record.pane_id}` | window: `{record.window_name}`\n\n"
+            f"{summary}\n\n"
+            f"Attach: `tmux attach -t {record.tmux_session}`\n"
+            f"Read: `/tmux read {record.id}`\n"
+            f"Send: `/tmux send {record.id} <text>`"
+        )
+
     async def _handle_reasoning_command(self, event: MessageEvent) -> str:
         """Handle /reasoning command — manage reasoning effort and display toggle.
 
