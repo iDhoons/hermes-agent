@@ -3261,6 +3261,12 @@ def systemd_restart(system: bool = False):
             f"⚠ Graceful restart did not complete within {int(drain_timeout + 5)}s; "
             "forcing a service restart..."
         )
+        try:
+            from gateway.status import write_planned_stop_marker
+
+            write_planned_stop_marker(pid)
+        except Exception:
+            pass
         _run_systemctl(
             ["reset-failed", svc],
             system=system,
