@@ -322,6 +322,12 @@ async def test_slash_command_registration_stays_under_discord_limit(adapter):
         }
         for i in range(200)
     }
+    many_plugins["server"] = {
+        "handler": lambda _a: "ok",
+        "description": "Open the server surface",
+        "args_hint": "",
+        "plugin": "server-surfaces",
+    }
 
     with patch("hermes_cli.plugins.get_plugin_commands", return_value=many_plugins):
         adapter._register_slash_commands()
@@ -334,10 +340,10 @@ async def test_slash_command_registration_stays_under_discord_limit(adapter):
         f"{_DISCORD_MAX_APP_COMMANDS} limit and would fail sync with 30032"
     )
 
-    # Native, high-priority commands are registered first and must survive
-    # the cap — they are the core UX, not droppable overflow.
-    for native in ("status", "stop", "new", "model", "help"):
-        assert native in tree_names, f"/{native} (native) was dropped by the cap"
+    # High-priority commands must survive the cap — native commands because
+    # they are the core UX, and /server because server surfaces depend on it.
+    for command in ("server", "status", "stop", "new", "model", "help"):
+        assert command in tree_names, f"/{command} was dropped by the cap"
 
     # The cap must actually have dropped overflow — not every plugin fit.
     registered_plugins = [n for n in tree_names if n.startswith("plug")]
@@ -1046,4 +1052,3 @@ def test_register_skill_command_autocomplete_filters_by_name_and_description(ada
     # (covered in other tests). The autocomplete filter itself is exercised
     # via direct function call in the real-discord integration path.
     assert skill_cmd.callback is not None
-

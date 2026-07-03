@@ -101,6 +101,34 @@ async def test_ensure_forum_commands_handles_set_failure():
 
 
 @pytest.mark.asyncio
+async def test_ensure_forum_commands_retries_with_lower_caps():
+    adapter = _make_test_adapter()
+    msg = _forum_message(chat_id=-654, is_forum=True)
+    adapter._bot.set_my_commands.side_effect = [Exception("too many commands"), None]
+
+    def _menu_for_cap(max_commands):
+        return ([(f"cmd{i}", f"Command {i}") for i in range(max_commands)], 0)
+
+    with (
+        patch("hermes_cli.commands.telegram_menu_commands") as mock_menu,
+        patch("hermes_cli.commands.telegram_menu_max_commands", return_value=60),
+    ):
+        mock_menu.side_effect = _menu_for_cap
+        with patch("telegram.BotCommand") as MockBotCommand:
+            MockBotCommand.side_effect = lambda name, desc: SimpleNamespace(
+                name=name,
+                description=desc,
+            )
+            with patch("telegram.BotCommandScopeChat") as MockScope:
+                MockScope.side_effect = lambda chat_id: SimpleNamespace(chat_id=chat_id)
+                await adapter._ensure_forum_commands(msg)
+
+    assert -654 in adapter._forum_command_registered
+    assert [call.kwargs["max_commands"] for call in mock_menu.call_args_list] == [60, 55]
+    assert [len(call.args[0]) for call in adapter._bot.set_my_commands.await_args_list] == [60, 55]
+
+
+@pytest.mark.asyncio
 async def test_ensure_forum_commands_race_safety():
     """Two concurrent coroutines must not double-register the same chat."""
     adapter = _make_test_adapter()

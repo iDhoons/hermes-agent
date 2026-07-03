@@ -242,6 +242,9 @@ _TELEGRAM_IMAGE_EXT_TO_MIME = {
 }
 
 
+_COMMAND_SCOPE_FALLBACK_CAPS = (80, 65, 55, 30)
+
+
 def check_telegram_requirements() -> bool:
     """Check if Telegram dependencies are available.
 
@@ -495,6 +498,44 @@ class TelegramAdapter(BasePlatformAdapter):
     def message_len_fn(self):
         """Telegram measures message length in UTF-16 code units."""
         return utf16_len
+
+    async def _set_my_commands_with_fallbacks(
+        self,
+        scope: Any,
+        scope_name: str,
+    ) -> tuple[int, int, int]:
+        from telegram import BotCommand
+        from hermes_cli.commands import telegram_menu_commands, telegram_menu_max_commands
+
+        last_error: Exception | None = None
+        configured_cap = telegram_menu_max_commands()
+        caps = tuple(
+            dict.fromkeys(
+                (
+                    configured_cap,
+                    *(cap for cap in _COMMAND_SCOPE_FALLBACK_CAPS if cap < configured_cap),
+                )
+            )
+        )
+        for cap in caps:
+            menu_commands, hidden_count = telegram_menu_commands(max_commands=cap)
+            bot_commands = [BotCommand(name, desc) for name, desc in menu_commands]
+            try:
+                await self._bot.set_my_commands(bot_commands, scope=scope)
+            except Exception as err:
+                last_error = err
+                logger.warning(
+                    "[%s] set_my_commands FAILED for scope %s at %d cap: %s",
+                    self.name,
+                    scope_name,
+                    cap,
+                    err,
+                )
+                continue
+            return len(bot_commands), hidden_count, cap
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No Telegram command caps configured")
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.TELEGRAM)
@@ -2849,40 +2890,51 @@ class TelegramAdapter(BasePlatformAdapter):
             # gateway command there automatically adds it to the Telegram menu.
             try:
                 from telegram import (
-                    BotCommand,
                     BotCommandScopeAllPrivateChats,
                     BotCommandScopeAllGroupChats,
                     BotCommandScopeDefault,
                 )
-                from hermes_cli.commands import telegram_menu_commands, telegram_menu_max_commands
                 if not self._bot:
                     return
-                # Telegram allows up to 100 commands but has an undocumented
-                # payload size limit (~4KB total).  Hermes defaults to 60 to
-                # keep built-ins plus common skill commands visible while
-                # staying under the threshold; users can tune the cap via
-                # platforms.telegram.extra.command_menu.
-                max_commands = telegram_menu_max_commands()
-                menu_commands, hidden_count = telegram_menu_commands(max_commands=max_commands)
-                bot_commands = [BotCommand(name, desc) for name, desc in menu_commands]
+                # Telegram officially allows up to 100 commands. Some servers
+                # still reject large menus, so each scope falls back to smaller
+                # caps while preserving the same priority order. The first cap
+                # still comes from platforms.telegram.extra.command_menu.
+                last_menu_stats = None
                 # Register for all scopes independently — Telegram picks the
                 # narrowest matching scope per chat type (forum topics fall
                 # through to AllGroupChats or Default).
                 for scope_cls in (BotCommandScopeDefault, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats):
                     scope_name = getattr(scope_cls, "__name__", str(scope_cls))
                     try:
-                        await self._bot.set_my_commands(bot_commands, scope=scope_cls())
-                        logger.info("[%s] set_my_commands OK for scope %s (%d cmds)", self.name, scope_name, len(bot_commands))
+                        registered_count, hidden_count, effective_cap = (
+                            await self._set_my_commands_with_fallbacks(
+                                scope_cls(),
+                                scope_name,
+                            )
+                        )
+                        last_menu_stats = (registered_count, hidden_count, effective_cap)
+                        logger.info(
+                            "[%s] set_my_commands OK for scope %s (%d cmds, %d cap)",
+                            self.name,
+                            scope_name,
+                            registered_count,
+                            effective_cap,
+                        )
                     except Exception as scope_err:
                         logger.warning("[%s] set_my_commands FAILED for scope %s: %s", self.name, scope_name, scope_err)
                 # Forum topics don't inherit AllGroupChats — Telegram resolves
                 # commands via BotCommandScopeChat(chat_id) for forum groups.
                 # Lazy registration happens in _ensure_forum_commands on first
                 # message from a forum topic (see _handle_text_message).
-                if hidden_count:
+                if last_menu_stats and last_menu_stats[1]:
+                    registered_count, hidden_count, effective_cap = last_menu_stats
                     logger.info(
                         "[%s] Telegram menu: %d commands registered, %d hidden (over %d limit). Use /commands for full list.",
-                        self.name, len(menu_commands), hidden_count, max_commands,
+                        self.name,
+                        registered_count,
+                        hidden_count,
+                        effective_cap,
                     )
             except Exception as e:
                 logger.warning(
@@ -7339,13 +7391,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 chat_id = int(chat.id)
                 if chat_id in self._forum_command_registered:
                     return
-                from telegram import BotCommand, BotCommandScopeChat
-                from hermes_cli.commands import telegram_menu_commands, telegram_menu_max_commands
-                menu_commands, _ = telegram_menu_commands(max_commands=telegram_menu_max_commands())
-                bot_commands = [BotCommand(name, desc) for name, desc in menu_commands]
-                await self._bot.set_my_commands(bot_commands, scope=BotCommandScopeChat(chat_id=chat_id))
+                from telegram import BotCommandScopeChat
+                registered_count, _, _ = await self._set_my_commands_with_fallbacks(
+                    BotCommandScopeChat(chat_id=chat_id),
+                    f"BotCommandScopeChat({chat_id})",
+                )
                 self._forum_command_registered.add(chat_id)
-                logger.info("[%s] Lazy-registered %d commands for forum chat %s", self.name, len(bot_commands), chat_id)
+                logger.info("[%s] Lazy-registered %d commands for forum chat %s", self.name, registered_count, chat_id)
             except Exception as e:
                 logger.warning("[%s] Forum command lazy-registration failed: %s", self.name, e)
 

@@ -1216,10 +1216,40 @@ class TestTelegramMenuCommands:
 
     def test_all_names_within_limit(self):
         menu, _ = telegram_menu_commands(max_commands=100)
+        assert len(menu) <= 100
         for name, _desc in menu:
             assert 1 <= len(name) <= _TG_NAME_LIMIT, (
                 f"Command '{name}' is {len(name)} chars (limit {_TG_NAME_LIMIT})"
             )
+
+    def test_server_plugin_command_survives_telegram_caps(self, monkeypatch):
+        """The mobile/server entry must stay visible even when the menu is capped."""
+        from hermes_cli import plugins as _plugins_mod
+
+        commands = {
+            f"plug{i:03d}": {
+                "handler": lambda _a: "ok",
+                "description": f"Plugin command {i}",
+                "args_hint": "",
+                "plugin": "stress-plugin",
+            }
+            for i in range(120)
+        }
+        commands["server"] = {
+            "handler": lambda _a: "ok",
+            "description": "Open the server surface",
+            "args_hint": "",
+            "plugin": "server-surfaces",
+        }
+        monkeypatch.setattr(_plugins_mod, "get_plugin_commands", lambda: commands)
+
+        for cap in (100, 55, 30):
+            menu, hidden = telegram_menu_commands(max_commands=cap)
+            names = [name for name, _desc in menu]
+
+            assert len(names) <= cap
+            assert hidden > 0
+            assert "server" in names
 
     def test_operational_builtins_survive_thirty_command_cap(self, tmp_path, monkeypatch):
         (tmp_path / "config.yaml").write_text(

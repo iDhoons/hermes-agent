@@ -52,6 +52,7 @@ _DISCORD_COMMAND_SYNC_MAX_RATE_LIMIT_SLEEP_SECONDS = 30.0
 # every slash command — not just the overflow ones. We keep the desired set
 # at or below this limit at registration time.
 _DISCORD_MAX_APP_COMMANDS = 100
+_DISCORD_PLUGIN_COMMAND_PRIORITY = ("server",)
 _DISCORD_NONCONVERSATIONAL_METADATA_KEYS = frozenset({
     "non_conversational",
     "non_conversational_history",
@@ -4164,7 +4165,24 @@ class DiscordAdapter(BasePlatformAdapter):
         try:
             from hermes_cli.commands import _iter_plugin_command_entries
 
-            for plugin_name, plugin_desc, plugin_args_hint in _iter_plugin_command_entries():
+            plugin_priority = {
+                name: index
+                for index, name in enumerate(_DISCORD_PLUGIN_COMMAND_PRIORITY)
+            }
+            plugin_entries = sorted(
+                enumerate(_iter_plugin_command_entries()),
+                key=lambda item: (
+                    0,
+                    plugin_priority[item[1][0].lower()[:32]],
+                    item[0],
+                )
+                if item[1][0].lower()[:32] in plugin_priority
+                else (
+                    1,
+                    item[0],
+                ),
+            )
+            for _index, (plugin_name, plugin_desc, plugin_args_hint) in plugin_entries:
                 discord_name = plugin_name.lower()[:32]
                 if discord_name in already_registered:
                     continue
