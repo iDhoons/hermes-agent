@@ -442,6 +442,33 @@ class TestPinUnpinDelete:
 
 
 # ---------------------------------------------------------------------------
+# Action: delete_channel
+# ---------------------------------------------------------------------------
+
+class TestDeleteChannel:
+    @patch("tools.discord_tool._discord_request")
+    def test_delete_channel(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {"id": "11", "name": "old-channel"}
+        result = json.loads(discord_admin_handler(action="delete_channel", channel_id="11"))
+        assert result["success"] is True
+        assert result["deleted_channel"] == {"id": "11", "name": "old-channel"}
+        mock_req.assert_called_once_with("DELETE", "/channels/11", "test-token")
+
+    def test_delete_channel_requires_channel_id(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        result = json.loads(discord_admin_handler(action="delete_channel"))
+        assert "Missing required parameters" in result["error"]
+
+    @patch("tools.discord_tool._discord_request")
+    def test_delete_channel_403_is_enriched(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.side_effect = DiscordAPIError(403, '{"message":"Missing Permissions"}')
+        result = json.loads(discord_admin_handler(action="delete_channel", channel_id="11"))
+        assert "MANAGE_CHANNELS" in result["error"]
+
+
+# ---------------------------------------------------------------------------
 # Action: create_thread
 # ---------------------------------------------------------------------------
 
